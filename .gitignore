@@ -1,0 +1,11 @@
+# Arquivos de ambiente
+.env
+API.txt
+
+# Cache do Python
+__pycache__/
+*.pyc
+
+# Arquivos de IDE
+.vscode/
+.idea/
