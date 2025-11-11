@@ -74,3 +74,6 @@ def send_message(recipient_jid, text):
 
 if __name__ == '__main__':
     app.run(port=5001, debug=True)
+    if __name__ == '__main__':
+    port = int(os.getenv('PORT', 5001))
+    app.run(host='0.0.0.0', port=port, debug=False)
