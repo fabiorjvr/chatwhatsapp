@@ -43,27 +43,30 @@ async function start() {
       // Chamar o script Python para processar a pergunta
       const { spawn } = require('child_process');
       if (message.from === '5521980306189@c.us') {
-        client.sendText(message.from, '🤖 Processando sua solicitação, aguarde...');
-        const pythonProcess = spawn('python', ['ai_agent_whatsapp.py', message.body]);
+        const pythonProcess = spawn('python', ['-u', 'ai_agent.py', message.body], {
+          stdio: ['pipe', 'pipe', 'pipe'],
+          encoding: 'utf-8',
+          env: { ...process.env, PYTHONIOENCODING: 'utf-8' }
+        });
 
-      let scriptOutput = "";
-      pythonProcess.stdout.on('data', (data) => {
-          scriptOutput += data.toString();
-      });
+        let scriptOutput = "";
+        pythonProcess.stdout.on('data', (data) => {
+            scriptOutput += data.toString('utf-8');
+        });
 
-      let scriptError = "";
-      pythonProcess.stderr.on('data', (data) => {
-          scriptError += data.toString();
-          console.error(`Erro do Python: ${data}`);
-      });
+        let scriptError = "";
+        pythonProcess.stderr.on('data', (data) => {
+            scriptError += data.toString('utf-8');
+            console.error(`Erro do Python: ${data}`);
+        });
 
-      pythonProcess.on('close', (code) => {
-          if (code === 0) {
-              client.sendText(message.from, scriptOutput);
-          } else {
-              client.sendText(message.from, 'Desculpe, ocorreu um erro ao processar sua solicitação.');
-          }
-      });
+        pythonProcess.on('close', (code) => {
+            if (code === 0) {
+                client.sendText(message.from, scriptOutput);
+            } else {
+                client.sendText(message.from, 'Desculpe, ocorreu um erro ao processar sua solicitação.');
+            }
+        });
     }
     });
 

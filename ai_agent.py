@@ -1,147 +1,141 @@
 # -*- coding: utf-8 -*- 
-import google.generativeai as genai 
-import os 
-import json 
-from tools import DatabaseTools 
+from dotenv import load_dotenv
+load_dotenv()
 
-class AIAgent: 
-    """ 
-    Agente de IA que interpreta perguntas e consulta o banco de dados. 
-    """ 
+from groq import Groq
+import os
+import json
+from tools import DatabaseTools
+import sys
+import inspect
+import re
 
-    def __init__(self): 
-        genai.configure(api_key=os.getenv("GEMINI_API_KEY")) 
-        self.model = genai.GenerativeModel('models/gemini-2.0-flash-exp')
-        self.db_tools = DatabaseTools() 
+class AIAgent:
+    """
+    Agente de IA que interpreta perguntas e consulta o banco de dados usando a API Groq.
+    """
+
+    def __init__(self):
+        self.db_tools = DatabaseTools()
+        groq_api_key = os.getenv("GROQ_API_KEY")
+        if not groq_api_key:
+            raise ValueError("A chave da API Groq não foi encontrada. Verifique o arquivo .env e a variável GROQ_API_KEY.")
+        
+        self.client = Groq(api_key=groq_api_key)
+        self.model_name = "llama-3.1-8b-instant"
+
+        # Converte as funções da classe DatabaseTools para o formato de ferramentas da API Groq/OpenAI
+        self.tools = self._get_tools_definitions()
         self.system_prompt = self._build_system_prompt()
 
-    def _build_system_prompt(self) -> str: 
-        return ''' 
-Você é um assistente de vendas de smartphones. Analise a pergunta do usuário e retorne APENAS um JSON válido (sem formatação markdown) indicando qual ferramenta usar. 
+    def _get_tools_definitions(self) -> list:
+        """
+        Gera as definições das ferramentas para a API do Groq a partir da classe DatabaseTools,
+        inspecionando as assinaturas das funções e analisando seus docstrings.
+        """
+        tool_definitions = []
+        # Itera sobre todos os membros da classe DatabaseTools
+        for name, func in inspect.getmembers(self.db_tools, inspect.isfunction):
+            # Ignora funções privadas ou que não são destinadas a serem ferramentas
+            if name.startswith("_") or name in ['conectar_banco', 'executar_query', 'fechar_conexao']:
+                continue
 
-**FERRAMENTAS DISPONÍVEIS:** 
+            # Analisa o docstring para extrair a descrição principal e dos parâmetros
+            docstring = inspect.getdoc(func)
+            if not docstring:
+                continue
 
-1. `get_top_products(month: int, year: int, limit: int)` 
-   - Retorna os N produtos MAIS vendidos de um mês/ano 
-   - Use para: "qual celular vendeu mais", "top 3 produtos", "mais vendido" 
-   - limit: 1 para "mais vendido", 3 para "top 3", 5 para "top 5" 
+            # A primeira linha é a descrição da função
+            description_match = re.match(r"^(.*?)\n", docstring, re.DOTALL)
+            description = description_match.group(1).strip() if description_match else "Sem descrição."
 
-2. `get_monthly_revenue(month: int, year: int)` 
-   - Retorna a RECEITA TOTAL de um mês/ano 
-   - Use para: "qual foi a receita", "faturamento", "valor de vendas" 
+            # Extrai descrições de parâmetros do docstring (formato: "- nome (tipo): descrição")
+            param_docs = dict(re.findall(r"-\s+([a-zA-Z_]+)\s+\([^)]+\):\s+(.*)", docstring))
 
-3. `get_product_sales_by_month(month: int, year: int)` 
-   - Retorna TODOS os produtos vendidos em um mês/ano 
-   - Use para: \"quanto vendeu de cada aparelho\", \"vendas por produto\", \"lista de vendas\" 
+            # Inspeciona a assinatura da função para obter os parâmetros
+            sig = inspect.signature(func)
+            parameters = sig.parameters
+            
+            tool_params = {
+                "type": "object",
+                "properties": {},
+                "required": [],
+            }
 
-4. `get_product_sales(produto: str, month: int, year: int)` 
-   - Retorna vendas de UM produto específico 
-   - Use para: "quanto vendeu o iPhone 15", "vendas do Galaxy S24" 
+            # Itera sobre os parâmetros da função (ignorando 'self')
+            for param_name, param in parameters.items():
+                if param_name == 'self':
+                    continue
+                
+                # Mapeia tipos Python para tipos JSON Schema
+                param_type = "string"
+                if param.annotation == int:
+                    param_type = "integer"
+                elif param.annotation == float:
+                    param_type = "number"
+                elif param.annotation == bool:
+                    param_type = "boolean"
+                elif param.annotation == list:
+                    param_type = "array"
 
-5. `get_comparison_by_manufacturer(month: int, year: int)` 
-   - Retorna vendas por FABRICANTE (Apple, Samsung, etc) 
-   - Use para: "comparar marcas", "qual marca vendeu mais" 
+                # Adiciona a definição do parâmetro
+                tool_params["properties"][param_name] = {
+                    "type": param_type,
+                    "description": param_docs.get(param_name, ""),
+                }
 
-6. `get_average_monthly_sales(year: int)`
-   - Retorna a MÉDIA de faturamento e unidades vendidas por mês em um ano.
-   - Use para: "qual a média de vendas", "média mensal de faturamento"
+                # Adiciona à lista de parâmetros obrigatórios se não tiver valor padrão
+                if param.default is inspect.Parameter.empty:
+                    tool_params["required"].append(param_name)
+            
+            # Adiciona a definição completa da ferramenta
+            tool_definitions.append({
+                "type": "function",
+                "function": {
+                    "name": name,
+                    "description": description,
+                    "parameters": tool_params,
+                },
+            })
+            
+        return tool_definitions
 
-7. `get_best_selling_month(year: int)`
-   - Retorna o MÊS com MAIOR faturamento em um ano.
-   - Use para: "qual mês vendeu mais", "melhor mês de vendas"
+    def _build_system_prompt(self) -> str:
+        return '''
+Você é um assistente de vendas de smartphones. Sua principal tarefa é analisar as perguntas do usuário e usar as ferramentas disponíveis para consultar um banco de dados de vendas.
 
-8. `get_least_sold_products(year: int, limit: int)`
-   - Retorna os N produtos MENOS vendidos de um ano.
-   - Use para: "qual celular vendeu menos", "piores produtos em vendas"
-   - limit: 1 para "menos vendido", 3 para "top 3 piores", 5 para "top 5 piores"
+**REGRAS DE OURO:**
+1.  **SEMPRE USE UMA FERRAMENTA:** Para qualquer pergunta sobre vendas (produtos, receita, comparações, etc.), você DEVE usar uma das ferramentas. Não tente responder com base no seu conhecimento geral.
+2.  **ANO PADRÃO = 2024:** Se o usuário não especificar o ano em sua pergunta, você DEVE assumir o ano de 2024 para todas as consultas.
+3.  **SEJA DIRETO:** Forneça respostas claras, diretas e informativas com base nos dados retornados pelas ferramentas.
+4.  **INFORME QUANDO NÃO HÁ DADOS:** Se uma ferramenta não retornar resultados, informe ao usuário de forma explícita que a informação não foi encontrada para os critérios solicitados.
+5.  **NÃO INVENTE:** Nunca invente dados ou informações. Sua base de conhecimento é estritamente o que as ferramentas fornecem.
+'''
 
-9. `get_multiple_product_sales(products: list, year: int)`
-   - Retorna as vendas de MÚLTIPLOS produtos em um ano.
-   - Use para: "compare as vendas do iPhone 15 e Galaxy S24"
-
-**REGRAS IMPORTANTES:** 
-- Sempre extraia MÊS e ANO da pergunta 
-- Se não mencionar ano, use 2024 
-- Para "mais vendido" use limit=1 
-- Para "top 3" use limit=3, "top 5" use limit=5 
-- Meses: janeiro=1, fevereiro=2, ..., dezembro=12 
-- Se a pergunta contiver "e" ou "vs" para comparar produtos, extraia todos os nomes e use a ferramenta `get_multiple_product_sales`.
-
-**FORMATO DE RESPOSTA (apenas JSON, sem ```json):** 
-
-Exemplo 1: 
-Pergunta: "qual celular vendeu mais em junho de 2024?" 
-Resposta: 
-{ 
-  "tool": "get_top_products", 
-  "params": {"month": 6, "year": 2024, "limit": 1} 
-} 
-
-Exemplo 2: 
-Pergunta: "qual foi valor de vendas de outubro de 2024?" 
-Resposta: 
-{ 
-  "tool": "get_monthly_revenue", 
-  "params": {"month": 10, "year": 2024} 
-} 
-
-Exemplo 3: 
-Pergunta: \"quanto vendeu de cada aparelho em fevereiro de 2025?\" 
-Resposta: 
-{ 
-  "tool": \"get_product_sales_by_month\", 
-  "params": {\"month\": 2, \"year\": 2025} 
-} 
-
-Exemplo 4: 
-Pergunta: "top 3 celulares que venderam mais em maio de 2025" 
-Resposta: 
-{ 
-  "tool": "get_top_products", 
-  "params": {"month": 5, "year": 2025, "limit": 3} 
-} 
-
-Exemplo 5: 
-Pergunta: "quanto vendeu o iPhone 15 em março?" 
-Resposta: 
-{ 
-  "tool": "get_product_sales", 
-  "params": {"produto": "iPhone 15", "month": 3, "year": 2024} 
-} 
-
-Exemplo 6:
-Pergunta: "compare as vendas do iPhone 15 Pro Max e do Samsung Galaxy S24 Ultra em 2024"
-Resposta:
-{
-  "tool": "get_multiple_product_sales",
-  "params": {"products": ["iPhone 15 Pro Max", "Samsung Galaxy S24 Ultra"], "year": 2024}
-}
-''' 
-
-    def _format_response(self, tool_name: str, data: list) -> str: 
-        """Formata os dados em resposta amigável.""" 
+    def _format_response(self, tool_name: str, data: list) -> str:
+        """Formata os dados em resposta amigável."""
         if not data or ("erro" in data[0]):
             return f"❌ Não encontrei dados para essa consulta. Detalhe: {data[0].get('erro')}"
 
-        try: 
-            if tool_name == "get_top_products": 
-                if len(data) == 1: 
-                    p = data[0] 
-                    return f"📱 O produto mais vendido foi:\n\n🏆 {p['modelo']} ({p['fabricante']})\n   {p['unidades_vendidas']:,} unidades vendidas\n   💰 R$ {p['receita_total']:,.2f}" 
-                else: 
-                    lines = ["📊 Ranking dos produtos mais vendidos:\n"] 
-                    for i, p in enumerate(data, 1): 
-                        emoji = "🥇" if i == 1 else "🥈" if i == 2 else "🥉" if i == 3 else f"{i}º" 
-                        lines.append(f"{emoji} {p['modelo']} ({p['fabricante']})") 
-                        lines.append(f"   📦 {p['unidades_vendidas']:,} unidades") 
-                        lines.append(f"   💰 R$ {p['receita_total']:,.2f}\n") 
-                    return "\n".join(lines) 
+        try:
+            if tool_name == "get_top_products":
+                if len(data) == 1:
+                    p = data[0]
+                    return f"📱 O produto mais vendido foi:\n\n🏆 {p['modelo']} ({p['fabricante']})\n   {p['unidades_vendidas']:,} unidades vendidas\n   💰 R$ {p['receita_total']:,.2f}"
+                else:
+                    lines = ["📊 Ranking dos produtos mais vendidos:\n"]
+                    for i, p in enumerate(data, 1):
+                        emoji = "🥇" if i == 1 else "🥈" if i == 2 else "🥉" if i == 3 else f"{i}º"
+                        lines.append(f"{emoji} {p['modelo']} ({p['fabricante']})")
+                        lines.append(f"   📦 {p['unidades_vendidas']:,} unidades")
+                        lines.append(f"   💰 R$ {p['receita_total']:,.2f}\n")
+                    return "\n".join(lines)
 
-            elif tool_name == "get_monthly_revenue": 
-                d = data[0] 
-                return f"💰 **Receita Total:** R$ {d['receita_total']:,.2f}\n📦 **Total de Unidades:** {d['total_unidades']:,}" 
+            elif tool_name == "get_monthly_revenue":
+                d = data[0]
+                return f"💰 **Receita Total:** R$ {d['receita_total']:,.2f}\n📦 **Total de Unidades:** {d['total_unidades']:,}"
 
-            elif tool_name == "get_product_sales_by_month": 
+            elif tool_name == "get_product_sales_by_month":
                 lines = ["📊 **Vendas do mês**:\n"]
                 if len(data) > 10:
                     lines = [f"📊 **Vendas do mês** (mostrando top 10 de {len(data)} produtos):\n"]
@@ -206,40 +200,87 @@ Resposta:
         """
         Processa a mensagem do usuário, chama a IA e executa a ferramenta.
         """
-        prompt = f'{self.system_prompt}\n\n--- PERGUNTA DO USUÁRIO ---\n{user_message}'
-
+        messages = [
+            {"role": "system", "content": self.system_prompt},
+            {"role": "user", "content": user_message},
+        ]
+        
         try:
-            # 1. Chamar o Gemini
-            response = self.model.generate_content(prompt)
-            
-            # Limpa a resposta para extrair apenas o JSON
-            cleaned_response = response.text.strip()
-            json_start = cleaned_response.find('{')
-            json_end = cleaned_response.rfind('}') + 1
-            if json_start == -1 or json_end == 0:
-                raise ValueError("Nenhum JSON válido encontrado na resposta da IA.")
-            
-            json_str = cleaned_response[json_start:json_end]
+            chat_completion = self.client.chat.completions.create(
+                messages=messages,
+                model=self.model_name,
+                tools=self.tools,
+                tool_choice="auto",
+                max_tokens=4096
+            )
 
-            # 2. Fazer o parse da resposta JSON
-            tool_call = json.loads(json_str)
-            tool_name = tool_call.get('tool')
-            tool_params = tool_call.get('params', {})
+            response_message = chat_completion.choices[0].message
+            tool_calls = response_message.tool_calls
 
-            if not tool_name:
-                return "❌ A IA não especificou uma ferramenta para usar."
+            if tool_calls:
+                available_tools = {
+                    func_name: getattr(self.db_tools, func_name) 
+                    for func_name in dir(self.db_tools) 
+                    if callable(getattr(self.db_tools, func_name)) and not func_name.startswith("_")
+                }
+                
+                messages.append(response_message)
 
-            # 3. Executar a ferramenta
-            if hasattr(self.db_tools, tool_name):
-                tool_function = getattr(self.db_tools, tool_name)
-                result = tool_function(**tool_params)
+                for tool_call in tool_calls:
+                    function_name = tool_call.function.name
+                    try:
+                        print(f"🤖 Chamando função: {function_name} com argumentos: {tool_call.function.arguments}", file=sys.stderr)
+                        
+                        if function_name not in available_tools:
+                            raise AttributeError(f"A função '{function_name}' não foi encontrada.")
+
+                        function_to_call = available_tools[function_name]
+                        function_args = json.loads(tool_call.function.arguments)
+                        function_response = function_to_call(**function_args)
+                        
+                        messages.append(
+                            {
+                                "tool_call_id": tool_call.id,
+                                "role": "tool",
+                                "name": function_name,
+                                "content": json.dumps(function_response),
+                            }
+                        )
+                    except (AttributeError, json.JSONDecodeError, Exception) as e:
+                        print(f"🐞 Erro ao executar a ferramenta: {e}", file=sys.stderr)
+                        messages.append({
+                            "tool_call_id": tool_call.id,
+                            "role": "tool",
+                            "name": function_name,
+                            "content": json.dumps({"error": str(e)})
+                        })
+                
+                second_response = self.client.chat.completions.create(
+                    model=self.model_name,
+                    messages=messages
+                )
+                return second_response.choices[0].message.content
             else:
-                return f"❌ Ferramenta '{tool_name}' não encontrada."
+                return response_message.content
 
-            # 4. Formatar a resposta
-            return self._format_response(tool_name, result)
-
-        except json.JSONDecodeError:
-            return f"❌ Erro: A resposta da IA não é um JSON válido.\nResposta recebida:\n{cleaned_response}"
         except Exception as e:
-            return f"🐞 Ocorreu um erro geral no processamento: {e}"
+            print(f"🐞 Erro na chamada da API Groq: {e}", file=sys.stderr)
+            return f"🐞 Ocorreu um erro ao comunicar com a IA: {e}"
+
+def main():
+    try:
+        if len(sys.argv) < 2:
+            print("Erro: Pergunta não fornecida.", file=sys.stderr)
+            sys.exit(1)
+
+        question = sys.argv[1]
+        agent = AIAgent()
+        response = agent.process_message(question)
+        print(response)
+
+    except Exception as e:
+        print(f"Erro inesperado em ai_agent.py: {e}", file=sys.stderr)
+        sys.exit(1)
+
+if __name__ == "__main__":
+    main()

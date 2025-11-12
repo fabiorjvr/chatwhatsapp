@@ -4,11 +4,14 @@ import os
 from datetime import date
 from dotenv import load_dotenv
 
-load_dotenv(encoding='latin-1')
+load_dotenv()
 
 def get_db_connection():
     """Estabelece a conexão com o banco de dados PostgreSQL."""
-    return psycopg2.connect(os.getenv("DATABASE_URL"))
+    db_url = os.getenv("DATABASE_URL")
+    if "?schema=" in db_url:
+        db_url = db_url.split("?schema=")[0]
+    return psycopg2.connect(db_url)
 
 class DatabaseTools:
     """
@@ -55,7 +58,12 @@ class DatabaseTools:
             self.conn.close()
 
     def get_top_products(self, limit: int = 1, month: int = None, year: int = None) -> list:
-        """Retorna os N produtos mais vendidos, opcionalmente filtrando por mês/ano."""
+        """
+        Retorna os N produtos mais vendidos.
+        Pode ser filtrado por ano ou por mês e ano.
+        - Para filtrar por ano, use o parâmetro 'year'.
+        - Para filtrar por mês e ano, use os parâmetros 'month' e 'year'.
+        """
         params = []
         query = """
             SELECT 
@@ -70,6 +78,9 @@ class DatabaseTools:
         if month and year:
             where_clauses.append("mes = %s AND ano = %s")
             params.extend([month, year])
+        elif year:
+            where_clauses.append("ano = %s")
+            params.append(year)
         
         if where_clauses:
             query += " WHERE " + " AND ".join(where_clauses)
@@ -84,7 +95,7 @@ class DatabaseTools:
         return self.executar_query(query, tuple(params))
 
     def get_monthly_revenue(self, month: int, year: int) -> list:
-        """Retorna a receita total e o total de unidades vendidas de um mês/ano."""
+        """Retorna a receita total e o total de unidades vendidas de um mês e ano específicos."""
         query = """
             SELECT 
                 SUM(receita) as receita_total,
@@ -95,7 +106,7 @@ class DatabaseTools:
         return self.executar_query(query, (month, year))
 
     def get_product_sales_by_month(self, month: int, year: int) -> list:
-        """Retorna todos os produtos vendidos em um mês/ano, ordenados por unidades vendidas."""
+        """Retorna todos os produtos vendidos em um mês e ano específicos, ordenados por unidades vendidas."""
         query = """
             SELECT 
                 modelo, 
@@ -109,7 +120,7 @@ class DatabaseTools:
         return self.executar_query(query, (month, year))
 
     def get_product_sales(self, produto: str, month: int, year: int) -> list:
-        """Retorna as vendas de um produto específico em um mês/ano."""
+        """Retorna as vendas de um produto específico em um mês e ano específicos."""
         query = """
             SELECT 
                 modelo, 
@@ -122,7 +133,12 @@ class DatabaseTools:
         return self.executar_query(query, (f"%{produto.lower()}%", month, year))
 
     def get_comparison_by_manufacturer(self, year: int, month: int = None) -> list:
-        """Retorna o total de vendas por fabricante, opcionalmente filtrando por mês/ano."""
+        """
+        Retorna o total de vendas por fabricante.
+        Pode ser filtrado por ano ou por mês e ano.
+        - Para filtrar por ano, use o parâmetro 'year'.
+        - Para filtrar por mês e ano, use os parâmetros 'month' e 'year'.
+        """
         params = []
         query = """
             SELECT 
@@ -213,7 +229,7 @@ class DatabaseTools:
         return self.executar_query(query, (year, limit))
 
     def get_multiple_product_sales(self, products: list, year: int) -> list:
-        """Retorna as vendas de múltiplos produtos em um ano."""
+        """Retorna as vendas de múltiplos produtos em um ano específico."""
         if not products:
             return []
 
